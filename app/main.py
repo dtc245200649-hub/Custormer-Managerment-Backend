@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import CORS_ORIGINS
 from app.database import Base, engine
-from app.models import User  # noqa: F401
+from app.models import LoginSession, User  # noqa: F401
 from app.routers.auth import router as auth_router
 
 Base.metadata.create_all(bind=engine)

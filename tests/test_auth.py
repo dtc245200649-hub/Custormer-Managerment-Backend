@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.database import Base, get_db
 from app.main import app
-from app.models import User
+from app.models import LoginSession, User
 from app.security import hash_password
 
 test_engine = create_engine(
@@ -55,6 +55,7 @@ def test_login_returns_access_token_and_role() -> None:
     assert response.status_code == 200
     assert response.json()["user"]["role"] == "staff"
     assert response.json()["access_token"]
+    assert response.json()["expires_in"] > 0
     me_response = client.get(
         "/api/auth/me",
         headers={"Authorization": f"Bearer {response.json()['access_token']}"},
@@ -115,3 +116,65 @@ def test_successful_login_resets_consecutive_failures() -> None:
         user = db.query(User).filter_by(email="user@example.com").one()
         assert user.failed_attempts == 0
         assert user.locked_until is None
+
+
+def test_refresh_renews_active_session() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "user@example.com", "password": "correct-password"},
+    )
+    token = login_response.json()["access_token"]
+    with TestSession() as db:
+        session = db.query(LoginSession).one()
+        session.expires_at = int(time.time()) + 5
+        db.commit()
+
+    refresh_response = client.post(
+        "/api/auth/refresh",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert refresh_response.status_code == 200
+    refreshed = refresh_response.json()
+    assert refreshed["access_token"]
+    assert refreshed["expires_in"] > 5
+    me_response = client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {refreshed['access_token']}"},
+    )
+    assert me_response.status_code == 200
+    assert me_response.json()["expires_in"] > 0
+
+
+def test_logout_revokes_server_session() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "user@example.com", "password": "correct-password"},
+    )
+    token = login_response.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    logout_response = client.post("/api/auth/logout", headers=headers)
+
+    assert logout_response.status_code == 204
+    assert client.get("/api/auth/me", headers=headers).status_code == 401
+    assert client.post("/api/auth/refresh", headers=headers).status_code == 401
+    with TestSession() as db:
+        assert db.query(LoginSession).count() == 0
+
+
+def test_expired_server_session_is_rejected() -> None:
+    login_response = client.post(
+        "/api/auth/login",
+        json={"email": "user@example.com", "password": "correct-password"},
+    )
+    token = login_response.json()["access_token"]
+
+    with TestSession() as db:
+        session = db.query(LoginSession).one()
+        session.expires_at = int(time.time()) - 1
+        db.commit()
+
+    headers = {"Authorization": f"Bearer {token}"}
+    assert client.get("/api/auth/me", headers=headers).status_code == 401
+    assert client.post("/api/auth/refresh", headers=headers).status_code == 401
